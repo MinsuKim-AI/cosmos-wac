@@ -44,4 +44,4 @@ cd "$COSMOS_POLICY_DIR"
   "dataloader_train.dataset.rollout_data_dir=$WAC_REPO/data/finetune/train_rollouts" \
   dataloader_train.dataset.demonstration_sampling_prob=0.25 \
   optimizer.lr=2e-5 job.project=cosmos_policy_minsu_solo "job.name=$RUN" \
-  2>&1 | tee "$WAC_REPO/data/finetune/$RUN/train.log"
+  2>&1 | tee -a "$WAC_REPO/data/finetune/$RUN/train.log"   # 다시 시작해도 로그를 이어 붙인다

@@ -91,7 +91,10 @@ def load_split(root, cond, split):
                             F = allz.astype(np.float32).var(axis=1).mean(axis=(1, 2, 3, 4))
                         if "hidden" in zf.files:
                             # (K, 블록, 9 프레임, 2048) → 블록별 프레임 평균을 이어 붙임 (K, 블록×2048)
-                            H = zf["hidden"].astype(np.float32).mean(axis=2).reshape(K, -1)
+                            hz = zf["hidden"].astype(np.float32)          # (K, 블록, 9, 2048)
+                            H = {"H": hz.mean(axis=2).reshape(K, -1),        # 모든 프레임
+                                 "H_now": hz[:, :, 1:4].mean(axis=2).reshape(K, -1),   # 현재 관절·손목·3인칭
+                                 "H_fut": hz[:, :, 5:9].mean(axis=2).reshape(K, -1)}   # 미래 관절·손목·3인칭·가치
             eps.append({"task": e["task_id"], "fail": int(not e["success"]), "K": K, "t": t,
                         "T_end": len(prop) - 1, "H": H,
                         "sig": {"A": A, "B": B, "C": C, "F": F}, "name": f"{cond}/{split}/{e['episode']}"})
@@ -135,7 +138,7 @@ def zscores(eps, calib, sigs):
 
 
 # 결정 시점 k의 입력: A_k, F_k, B_{k-1}, C_{k-1}
-NOW, LAG = ("A", "F"), ("B", "C")
+NOW, LAG = ("A", "F", "O"), ("B", "C")
 
 
 def decision_inputs(e, sigs):
@@ -235,6 +238,9 @@ def evaluate(cond, calib, ev, detectors):
             "threshold": tau,
             "false_alarm": float(stopped[~fails].mean()),
             "detection_rate": float(stopped[fails].mean()),
+            "balanced_accuracy": float((stopped[fails].mean() + (1 - stopped[~fails].mean())) / 2),
+            "median_detect_time_norm": float(np.median([stop_t[i] / ev[i]["T_end"] for i in range(len(ev))
+                                                        if fails[i] and stopped[i]])) if det_steps else None,
             "median_detect_step": float(np.median(det_steps)) if det_steps else None,
             "saved_steps_per_failure": float(saved[fails].mean()),
             "saved_fraction_of_failure_steps": float(saved[fails].sum() / fail_steps.sum()),
@@ -307,6 +313,29 @@ for cond in ["obj_0.090", "wristroll_50"]:
     has_f = all(np.isfinite(e["sig"]["F"]).any() for e in calib + ev)
     has_h = all(e["H"] is not None for e in calib + ev)
     sigs = ["A", "B", "C"] + (["F"] if has_f else [])
+    if has_h:
+        # 신호 O (FIPER의 OOD 점수에 해당, 라벨 없음): calib 성공 에피소드의 hidden 분포(PCA 16차원)에서 벗어난 정도.
+        # calib 성공 에피소드는 자기 자신을 빼고 맞춘 분포로 잰다(5묶음 cross-fitting).
+        succ = [e for e in calib if not e["fail"]]
+
+        def ood_model(eps):
+            X = np.vstack([e["H"]["H"] for e in eps])
+            pr = pca_fit(X, 16)
+            Z = pr(X, 16)
+            mu, var = Z.mean(0), Z.var(0) + 1e-6
+            return lambda e: (((pr(e["H"]["H"], 16) - mu) ** 2) / var).sum(1)
+
+        full = ood_model(succ)
+        held = {}
+        for j in range(5):
+            part = succ[j::5]
+            part_ids = {id(e) for e in part}
+            m = ood_model([e for e in succ if id(e) not in part_ids])
+            for e in part:
+                held[id(e)] = m(e)
+        for e in calib + ev:
+            e["sig"]["O"] = held.get(id(e), None) if id(e) in held else full(e)
+        sigs.append("O")
     zscores(calib + ev, calib, sigs)  # 보정은 calib 성공 에피소드로만
 
     def single(s):
@@ -318,15 +347,20 @@ for cond in ["obj_0.090", "wristroll_50"]:
     tasks = sorted({e["task"] for e in calib})
     folds = [tasks[i::5] for i in range(5)]
     # D: 모든 정보(WAC 신호 + hidden feature)를 함께. D-WAC, D-hidden은 한쪽을 뺀 비교
-    kinds = ["D", "D-WAC", "D-hidden"] if has_h else ["D-WAC"]
+    # D-hidden-now / D-hidden-future: hidden을 현재 관측 프레임과 미래 예측 프레임으로 나눈 비교 (Foresight)
+    kinds = ["D", "D-WAC", "D-hidden", "D-hidden-now", "D-hidden-future"] if has_h else ["D-WAC"]
+    HKEY = {"D": "H", "D-hidden": "H", "D-hidden-now": "H_now", "D-hidden-future": "H_fut"}
+    wac_sigs = [x for x in sigs if x != "O"]
     models = {k: {} for k in kinds}
 
     def feats(e, kind, proj, n):
         parts = []
-        if kind in ("D", "D-WAC"):
-            parts.append(np.nan_to_num(decision_inputs(e, sigs), nan=0.0))
-        if kind in ("D", "D-hidden"):
-            parts.append(proj(e["H"], n))
+        if kind == "D":
+            parts.append(np.nan_to_num(decision_inputs(e, sigs), nan=0.0))       # WAC 신호 + O
+        if kind == "D-WAC":
+            parts.append(np.nan_to_num(decision_inputs(e, wac_sigs), nan=0.0))
+        if kind in HKEY:
+            parts.append(proj(e["H"][HKEY[kind]], n))
         return np.hstack(parts)
 
     def fit(tr, kind, proj, n, l2):
@@ -343,12 +377,12 @@ for cond in ["obj_0.090", "wristroll_50"]:
         """PCA 차원과 L2 세기를 학습 묶음 안의 지시문 단위 내부 교차검증 AUROC로 고른다 (eval은 쓰지 않는다)."""
         tt = sorted({e["task"] for e in tr})
         inner = [tt[i::4] for i in range(4)]
-        grid = [(n, l2) for n in (PCA_GRID if kind != "D-WAC" else [0]) for l2 in L2_GRID]
+        grid = [(n, l2) for n in (PCA_GRID if kind in HKEY else [0]) for l2 in L2_GRID]
         scores = {g: ([], []) for g in grid}
         for ifold in inner:
             itr = [e for e in tr if e["task"] not in ifold]
             iva = [e for e in tr if e["task"] in ifold]
-            proj = pca_fit(np.vstack([e["H"] for e in itr]), max(PCA_GRID)) if kind != "D-WAC" else None
+            proj = pca_fit(np.vstack([e["H"][HKEY[kind]] for e in itr]), max(PCA_GRID)) if kind in HKEY else None
             for g in grid:
                 b = fit(itr, kind, proj, *g)
                 scores[g][0].extend(final_score(e, kind, b, proj, g[0]) for e in iva)
@@ -358,8 +392,8 @@ for cond in ["obj_0.090", "wristroll_50"]:
     chosen = {k: [] for k in kinds}
     for fold in folds:
         tr = [e for e in calib if e["task"] not in fold]
-        proj = pca_fit(np.vstack([e["H"] for e in tr]), max(PCA_GRID)) if has_h else None
         for kind in kinds:
+            proj = pca_fit(np.vstack([e["H"][HKEY[kind]] for e in tr]), max(PCA_GRID)) if kind in HKEY else None
             n, l2 = select(tr, kind)
             chosen[kind].append((n, l2))
             b = fit(tr, kind, proj, n, l2)
@@ -379,7 +413,7 @@ for cond in ["obj_0.090", "wristroll_50"]:
     res = evaluate(cond, calib, ev, dets)
     res["_meta"] = {"signals": sigs, "hidden": has_h, "chosen_pca_l2": {k: [list(map(float, c)) for c in v] for k, v in chosen.items()}, "n_calib": len(calib), "n_eval": len(ev),
                     "eval_fail": int(sum(e["fail"] for e in ev)),
-                    "D_coef_mean": dict(zip(sigs + ["bias"],
+                    "D_coef_mean": dict(zip(wac_sigs + ["bias"],
                                             np.mean([models["D-WAC"][t][0] for t in tasks], 0).round(3).tolist()))}
     out[cond] = res
     print(f"\n== {cond}: calib {len(calib)}, eval {len(ev)} (실패 {res['_meta']['eval_fail']}), 신호 {sigs}, hidden {has_h}")

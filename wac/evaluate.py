@@ -266,6 +266,12 @@ def evaluate(cond, calib, ev, detectors):
             "success_rate_after_stop": float(((~fails) & ~stp).mean()),
             "band_quantile": float(min(q_band, 1.0)),
         }
+        # 정성 분석 그림용: 에피소드별 점수 곡선과 중단 시점 (A와 D만)
+        if name in ("A", "D", "D-WAC"):
+            res[name]["threshold_k"] = tau_k.tolist()
+            res[name]["episodes"] = [{"name": ev[i]["name"], "fail": int(fails[i]), "t": ev[i]["t"].tolist(),
+                                      "R": np.nan_to_num(R[i], neginf=-99).tolist(), "stop_t": stop_t[i]}
+                                     for i in range(len(ev))]
     for name in detectors:
         if name == "A":
             continue

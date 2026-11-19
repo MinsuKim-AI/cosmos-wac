@@ -17,6 +17,8 @@ size_categories:
 
 Cosmos Policy(`nvidia/Cosmos-Policy-LIBERO-Predict2-2B`)를 LIBERO-Spatial에서 교란을 넣어 돌린 에피소드 모음이다. 정책이 추론마다 생성한 미래 예측(16 step 뒤 이미지 latent, 관절, 가치)과 실제 관측을 함께 저장해서, 예측과 실제의 차이로 실패를 미리 알아채는 연구(cosmos-wac)에 쓴다.
 
+코드와 실험 기록은 GitHub 저장소 [MinsuKim-AI/cosmos-wac](https://github.com/MinsuKim-AI/cosmos-wac)에 있다. 데이터를 모은 방법과 교란 크기를 정한 과정은 저장소의 [Experiment.md](https://github.com/MinsuKim-AI/cosmos-wac/blob/main/docs/Experiment.md)에 적었다.
+
 ## 교란 조건
 
 한 에피소드에는 교란을 하나만 넣는다. 크기는 성공률이 50% 근처가 되도록 직접 재서 정했다.

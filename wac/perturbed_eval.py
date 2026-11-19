@@ -39,6 +39,8 @@ WAC_ARGS = {
     "--episode_dir": str,    # 묶음 폴더. 이 아래에 D01_<지시문>/ 폴더들이 생긴다
     "--live_dir": str,       # 원격 감시용: 몇 step마다 최신 화면을 <live_dir>/<live_name>.jpg로 덮어쓴다
     "--live_name": str,
+    "--n_samples": int,      # 신호 F: chunk마다 seed만 바꿔 추가로 생성할 표본 수를 포함한 전체 수 (1이면 추가 없음)
+    "--hidden": str,         # hidden feature를 저장할 DiT 블록 번호, 쉼표로 구분 (예: 6,13,20,27). 빈 값이면 저장 안 함
 }
 
 # 지금 돌고 있는 에피소드의 환경. get_action 가로채기에서 chunk 값을 여기에 쌓는다.
@@ -64,7 +66,7 @@ def pop_wac_args(argv):
     opts = {"obj_xy_noise": 0.0, "cam_shift": 0.0, "wrist_roll_deg": 0.0,
             "cam_yaw_deg": 0.0, "perturb_seed": 0,
             "show": False, "video_dir": "", "perturb_log": "", "init_offset": 0, "episode_dir": "",
-            "live_dir": "", "live_name": "worker"}
+            "live_dir": "", "live_name": "worker", "n_samples": 1, "hidden": ""}
     rest, i = [argv[0]], 1
     while i < len(argv):
         key, val = argv[i], None
@@ -256,6 +258,14 @@ def write_episode_files(task_dir, name, env):
             latent=np.stack([c["latent"] for c in env.chunks]),          # (K, 16, 4, 28, 28) 프레임 5~8
             proprio=np.stack(env.proprio).astype(np.float32),            # (T+1, 9) step마다 실제 관절
             meta=json.dumps(rec, ensure_ascii=False),
+            # 신호 F: seed만 바꾼 추가 표본 (--n_samples > 1일 때만)
+            **({k: np.stack([c[k] for c in env.chunks]) for k in ("extra_value", "extra_future_proprio_norm", "extra_latent")}
+               if "extra_value" in env.chunks[0] else {}),
+            # hidden feature: 실행한 표본의 마지막 denoising step에서 블록 출력을 공간 평균 (K, 블록 수, 9, 2048)
+            **({"hidden": np.stack([c["hidden"] for c in env.chunks]),
+                "hidden_blocks": np.array([int(b) for b in opts["hidden"].split(",")]),
+                "hidden_n_calls": np.array([c["hidden_n_calls"] for c in env.chunks])}
+               if "hidden" in env.chunks[0] else {}),
         )
 
     pred_path = os.path.join(task_dir, "predictions.csv")
@@ -457,11 +467,24 @@ class PerturbedEnv:
         # 공식 prepare_observation과 같은 순서: 그리퍼 2 + 엔드이펙터 위치 3 + 쿼터니언 4
         return np.concatenate((obs["robot0_gripper_qpos"], obs["robot0_eef_pos"], obs["robot0_eef_quat"]))
 
-    def log_chunk(self, rd):
-        """get_action 반환값에서 WAC 계산에 필요한 값을 뽑아 둔다. t는 이 chunk를 추론한 시점의 step 번호."""
+    def log_chunk(self, rd, extras=()):
+        """get_action 반환값에서 WAC 계산에 필요한 값을 뽑아 둔다. t는 이 chunk를 추론한 시점의 step 번호.
+        extras는 같은 입력에서 seed만 바꿔 추가로 생성한 표본들이다 (신호 F용, 실행에는 쓰지 않는다)."""
         lat = rd["generated_latent"][0].float().cpu().numpy()        # (16, 9, 28, 28)
         fut = rd.get("future_image_predictions") or {}
+        extra = {}
+        if "hidden" in rd:
+            extra["hidden"] = rd["hidden"]                             # (블록 수, 9, 2048) fp16
+            extra["hidden_n_calls"] = rd["hidden_n_calls"]
+        if extras:
+            el = [e["generated_latent"][0].float().cpu().numpy() for e in extras]
+            extra.update({
+                "extra_value": np.array([float(e["value_prediction"]) for e in extras], dtype=np.float32),
+                "extra_future_proprio_norm": np.stack([untile(x[:, 5], PROPRIO_DIM) for x in el]).astype(np.float32),
+                "extra_latent": np.stack([x[:, SAVE_FRAMES] for x in el]).astype(np.float16),  # (N-1, 16, 4, 28, 28)
+            })
         self.chunks.append({
+            **extra,
             # 공식 코드가 디코딩한 예측 미래 이미지 (224x224, 바로 세운 방향). 결과 정리용
             "pred_primary": fut.get("future_image"),
             "pred_wrist": fut.get("future_wrist_image"),
@@ -567,12 +590,53 @@ def main():
         return result
 
     # chunk마다 정책 출력(생성 latent, 가치)을 가로채서 저장한다.
+    import torch
     orig_get_action = rle.get_action
 
+    hidden_blocks = [int(b) for b in opts["hidden"].split(",")] if opts["hidden"] else []
+    hidden_calls = []   # 블록 forward마다 (블록별 출력) 기록. denoising step 순서대로 쌓인다
+    hooked = []
+
+    def _install_hooks(model):
+        net = model.net
+        buf = {}
+
+        def make(i):
+            def hook(_m, _inp, out):
+                if not hidden_calls_on[0]:
+                    return
+                x = out[0] if isinstance(out, tuple) else out          # (B, T=9, H, W, D)
+                buf[i] = x[0].float().mean(dim=(1, 2)).to(torch.float16).cpu().numpy()  # (9, D)
+                if i == hidden_blocks[-1]:
+                    hidden_calls.append(np.stack([buf[b] for b in hidden_blocks]))
+            return hook
+
+        for i in hidden_blocks:
+            net.blocks[i].register_forward_hook(make(i))
+        hooked.append(True)
+
+    hidden_calls_on = [False]
+
     def get_action(*args, **kwargs):
-        rd = orig_get_action(*args, **kwargs)
+        if hidden_blocks and not hooked:
+            _install_hooks(args[1])
+        hidden_calls.clear()
+        hidden_calls_on[0] = bool(hidden_blocks)
+        rd = orig_get_action(*args, **kwargs)          # 실행하는 행동은 원래 seed의 표본 그대로
+        hidden_calls_on[0] = False
+        if hidden_blocks:
+            # 마지막 denoising step의 forward. CFG로 forward가 step마다 두 번이면 앞의 것(조건부)을 쓴다
+            n_steps = kwargs.get("num_denoising_steps_action") or len(hidden_calls)
+            rd["hidden"] = hidden_calls[-2] if len(hidden_calls) == 2 * n_steps else hidden_calls[-1]
+            rd["hidden_n_calls"] = len(hidden_calls)
+        extras = []
+        if opts["n_samples"] > 1:
+            # 같은 입력에서 seed만 바꿔 추가 표본을 만든다. 측정에만 쓰고 실행하지 않는다.
+            base = kwargs.get("seed", 1)
+            extras = [orig_get_action(*args, **{**kwargs, "seed": base + 1000 * (j + 1)})
+                      for j in range(opts["n_samples"] - 1)]
         if CURRENT_ENV is not None and opts["episode_dir"]:
-            CURRENT_ENV.log_chunk(rd)
+            CURRENT_ENV.log_chunk(rd, extras)
         return rd
 
     # 묶음(학습용, 보정용, 평가용)마다 다른 초기 상태를 쓰도록 앞에서부터 init_offset개를 건너뛴다.

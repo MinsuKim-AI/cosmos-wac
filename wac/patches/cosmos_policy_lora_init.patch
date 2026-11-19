@@ -1,0 +1,20 @@
+diff --git a/cosmos_policy/_src/predict2/models/text2world_model.py b/cosmos_policy/_src/predict2/models/text2world_model.py
+index 0bc8b6b..30cbd1f 100644
+--- a/cosmos_policy/_src/predict2/models/text2world_model.py
++++ b/cosmos_policy/_src/predict2/models/text2world_model.py
+@@ -229,6 +229,15 @@ class DiffusionModel(ImaginaireModel):
+                 net.to_empty(device="cuda")
+                 # IMPORTANT: (qsh) model init should not depends on current tensor shape, or it can handle Dtensor shape.
+                 net.init_weights()
++                if config.use_lora:
++                    # to_empty 뒤 init_weights는 원래 층만 초기화하고 LoRA는 빈 메모리로 남긴다.
++                    # 체크포인트에도 LoRA 키가 없으므로, 여기서 PEFT 기본값(A: kaiming, B: 0)으로 초기화한다.
++                    n_reset = 0
++                    for m in net.modules():
++                        if hasattr(m, "reset_lora_parameters") and "default" in getattr(m, "lora_A", {}):
++                            m.reset_lora_parameters("default", config.init_lora_weights)
++                            n_reset += 1
++                    log.info(f"LoRA 초기화: {n_reset}개 층")
+ 
+             if self.fsdp_device_mesh:
+                 broadcast_dtensor_model_states(net, self.fsdp_device_mesh)

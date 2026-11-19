@@ -12,7 +12,7 @@ import json
 import os
 import sys
 
-ROOT = os.path.expanduser("~/wac_cosmos/repo/data/libero_spatial_F")
+ROOT = os.path.expanduser(os.environ.get("WAC_F_ROOT", "~/wac_cosmos/repo/data/libero_spatial_F"))  # 파인튜닝 모델은 다른 폴더
 CONDITIONS = {"obj_0.090": ["--obj_xy_noise", "0.09"], "wristroll_50": ["--wrist_roll_deg", "50"]}
 SPLITS = [("calib", 10, 10, 2), ("eval", 20, 10, 3)]
 only = sys.argv[1:]  # 예: calib_i10 하나만 (시험용)

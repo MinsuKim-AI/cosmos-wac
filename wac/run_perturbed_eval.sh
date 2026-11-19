@@ -5,8 +5,9 @@ source "$(dirname "$0")/env.sh"
 SUITE=${1:-libero_spatial}; TRIALS=${2:-1}; shift 2 || true
 cd "$COSMOS_POLICY_DIR"
 CK=nvidia/Cosmos-Policy-LIBERO-Predict2-2B
+CKPT=${WAC_CKPT:-$CK}   # 파인튜닝 모델은 WAC_CKPT에 병합한 .pt 경로 (통계와 T5 임베딩은 공개 것 그대로)
 exec "$VENV/bin/python" "$WAC_DIR/wac/perturbed_eval.py" \
-  --config cosmos_predict2_2b_480p_libero__inference_only --ckpt_path $CK \
+  --config cosmos_predict2_2b_480p_libero__inference_only --ckpt_path $CKPT \
   --config_file cosmos_policy/config/config.py \
   --use_wrist_image True --use_proprio True --normalize_proprio True --unnormalize_actions True \
   --dataset_stats_path $CK/libero_dataset_statistics.json \

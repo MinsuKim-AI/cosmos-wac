@@ -263,7 +263,7 @@ def write_episode_files(task_dir, name, env):
                if "extra_value" in env.chunks[0] else {}),
             # hidden feature: 실행한 표본의 마지막 denoising step에서 블록 출력을 공간 평균 (K, 블록 수, 9, 2048)
             **({"hidden": np.stack([c["hidden"] for c in env.chunks]),
-                "hidden_blocks": np.array([int(b) for b in opts["hidden"].split(",")]),
+                "hidden_blocks": np.array(env.chunks[0]["hidden_blocks"]),
                 "hidden_n_calls": np.array([c["hidden_n_calls"] for c in env.chunks])}
                if "hidden" in env.chunks[0] else {}),
         )
@@ -476,6 +476,7 @@ class PerturbedEnv:
         if "hidden" in rd:
             extra["hidden"] = rd["hidden"]                             # (블록 수, 9, 2048) fp16
             extra["hidden_n_calls"] = rd["hidden_n_calls"]
+            extra["hidden_blocks"] = rd["hidden_blocks"]
         if extras:
             el = [e["generated_latent"][0].float().cpu().numpy() for e in extras]
             extra.update({
@@ -629,6 +630,7 @@ def main():
             n_steps = kwargs.get("num_denoising_steps_action") or len(hidden_calls)
             rd["hidden"] = hidden_calls[-2] if len(hidden_calls) == 2 * n_steps else hidden_calls[-1]
             rd["hidden_n_calls"] = len(hidden_calls)
+            rd["hidden_blocks"] = list(hidden_blocks)
         extras = []
         if opts["n_samples"] > 1:
             # 같은 입력에서 seed만 바꿔 추가 표본을 만든다. 측정에만 쓰고 실행하지 않는다.

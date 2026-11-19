@@ -39,6 +39,7 @@ p.add_argument("out")
 p.add_argument("--f_dir", default="")
 p.add_argument("--boot", type=int, default=2000)
 p.add_argument("--pca", type=int, default=32)
+p.add_argument("--only_with_f", action="store_true", help="F, hidden이 있는 에피소드만 쓴다 (수집 중 시험용)")
 a = p.parse_args()
 
 CHUNK, MIN_N, FLOOR_FRAC, Q = 16, 5, 0.10, 0.95
@@ -53,10 +54,13 @@ def load_split(root, cond, split):
     eps = []
     for jl in sorted(glob.glob(os.path.join(root, cond, split, "D*", "episodes.jsonl"))):
         d = os.path.dirname(jl)
+        # 중단 후 다시 돌린 작업은 같은 에피소드를 다시 적으므로 마지막 기록만 쓴다
+        recs = {}
         for line in open(jl, encoding="utf-8"):
-            if not line.strip():
-                continue
-            e = json.loads(line)
+            if line.strip():
+                r = json.loads(line)
+                recs[r["episode"]] = r
+        for e in recs.values():
             z = np.load(os.path.join(d, e["episode"] + ".npz"))
             t = z["chunk_t"].astype(int)
             K = len(t)
@@ -241,7 +245,15 @@ def evaluate(cond, calib, ev, detectors):
         # 시점별 임계값 (SAFE, FAIL-Detect의 time-varying conformal band): chunk 순번 k마다
         # calib 성공 에피소드의 R_k 95% 분위수. 이미 끝난 에피소드는 마지막 점수를 유지한다.
         cal_R = [score_fn(e) for e in calib if not e["fail"]]
-        tau_k = np.array([np.quantile([r[min(k, len(r) - 1)] for r in cal_R], Q) for k in range(maxK)])
+        # 띠 전체로 calib 성공 에피소드의 95%가 한 번도 넘지 않도록, chunk별 분위수 수준 q를 올려 가며 고른다
+        def band(q):
+            return np.array([np.quantile([r[min(k, len(r) - 1)] for r in cal_R], q) for k in range(maxK)])
+
+        def crossing(tk):
+            return np.mean([any(r[k] > tk[min(k, maxK - 1)] for k in range(len(r))) for r in cal_R])
+
+        q_band = next((q for q in np.arange(Q, 1.0001, 0.0025) if crossing(band(min(q, 1.0))) <= 1 - Q), 1.0)
+        tau_k = band(min(q_band, 1.0))
         det_tv = [next((k for k in range(len(r)) if r[k] > tau_k[min(k, maxK - 1)]), None) for r in R]
         st_tv = [int(ev[i]["t"][d]) if d is not None else None for i, d in enumerate(det_tv)]
         stp = np.array([s is not None for s in st_tv])
@@ -252,6 +264,7 @@ def evaluate(cond, calib, ev, detectors):
             "median_detect_step": float(np.median(dsteps)) if dsteps else None,
             "saved_fraction_of_failure_steps": float(sv[fails].sum() / fail_steps.sum()),
             "success_rate_after_stop": float(((~fails) & ~stp).mean()),
+            "band_quantile": float(min(q_band, 1.0)),
         }
     for name in detectors:
         if name == "A":
@@ -263,16 +276,28 @@ def evaluate(cond, calib, ev, detectors):
 
 
 # ---------------- hidden feature ----------------
-def pca_fit(X, n):
+def pca_fit(X, n_max):
+    """표준화 후 PCA. 반환 함수 proj(Z, n)은 앞 n개 성분을 준다."""
     mu, sd = X.mean(0), X.std(0) + 1e-6
     _, _, vt = np.linalg.svd((X - mu) / sd, full_matrices=False)
-    return lambda Z: ((Z - mu) / sd) @ vt[:n].T
+    vt = vt[:n_max]
+    return lambda Z, n: ((Z - mu) / sd) @ vt[:n].T
+
+
+PCA_GRID = [4, 8, 16, 32]
+L2_GRID = [1e-2, 1e-1, 1.0, 10.0]
 
 
 # ---------------- 실행 ----------------
 out = {}
 for cond in ["obj_0.090", "wristroll_50"]:
     calib, ev = load_split(a.data_dir, cond, "calib"), load_split(a.data_dir, cond, "eval")
+    if a.only_with_f:
+        calib = [e for e in calib if e["H"] is not None]
+        ev = [e for e in ev if e["H"] is not None]
+        if not calib or not ev:
+            print(f"{cond}: F 데이터 없음, 건너뜀")
+            continue
     has_f = all(np.isfinite(e["sig"]["F"]).any() for e in calib + ev)
     has_h = all(e["H"] is not None for e in calib + ev)
     sigs = ["A", "B", "C"] + (["F"] if has_f else [])
@@ -290,29 +315,55 @@ for cond in ["obj_0.090", "wristroll_50"]:
     kinds = ["D", "D-WAC", "D-hidden"] if has_h else ["D-WAC"]
     models = {k: {} for k in kinds}
 
-    def feats(e, kind, proj):
+    def feats(e, kind, proj, n):
         parts = []
         if kind in ("D", "D-WAC"):
             parts.append(np.nan_to_num(decision_inputs(e, sigs), nan=0.0))
         if kind in ("D", "D-hidden"):
-            parts.append(proj(e["H"]))
+            parts.append(proj(e["H"], n))
         return np.hstack(parts)
 
-    for fold in folds:
-        tr = [e for e in calib if e["task"] not in fold]
-        proj = pca_fit(np.vstack([e["H"] for e in tr]), a.pca) if has_h else None
+    def fit(tr, kind, proj, n, l2):
+        X = np.vstack([feats(e, kind, proj, n) for e in tr])
         yy = np.concatenate([[e["fail"]] * e["K"] for e in tr])
         ww = np.concatenate([[1 / e["K"]] * e["K"] for e in tr])
+        return fit_logreg(X, yy, ww, l2=l2)
+
+    def final_score(e, kind, b, proj, n):
+        X = feats(e, kind, proj, n)
+        return np.max(np.hstack([X, np.ones((len(X), 1))]) @ b)
+
+    def select(tr, kind):
+        """PCA 차원과 L2 세기를 학습 묶음 안의 지시문 단위 내부 교차검증 AUROC로 고른다 (eval은 쓰지 않는다)."""
+        tt = sorted({e["task"] for e in tr})
+        inner = [tt[i::4] for i in range(4)]
+        grid = [(n, l2) for n in (PCA_GRID if kind != "D-WAC" else [0]) for l2 in L2_GRID]
+        scores = {g: ([], []) for g in grid}
+        for ifold in inner:
+            itr = [e for e in tr if e["task"] not in ifold]
+            iva = [e for e in tr if e["task"] in ifold]
+            proj = pca_fit(np.vstack([e["H"] for e in itr]), max(PCA_GRID)) if kind != "D-WAC" else None
+            for g in grid:
+                b = fit(itr, kind, proj, *g)
+                scores[g][0].extend(final_score(e, kind, b, proj, g[0]) for e in iva)
+                scores[g][1].extend(e["fail"] for e in iva)
+        return max(grid, key=lambda g: auroc(np.array(scores[g][0]), np.array(scores[g][1])))
+
+    chosen = {k: [] for k in kinds}
+    for fold in folds:
+        tr = [e for e in calib if e["task"] not in fold]
+        proj = pca_fit(np.vstack([e["H"] for e in tr]), max(PCA_GRID)) if has_h else None
         for kind in kinds:
-            X = np.vstack([feats(e, kind, proj) for e in tr])
-            b = fit_logreg(X, yy, ww, l2=1e-2 if kind == "D-WAC" else 1e-1)
+            n, l2 = select(tr, kind)
+            chosen[kind].append((n, l2))
+            b = fit(tr, kind, proj, n, l2)
             for t_ in fold:
-                models[kind][t_] = (b, proj)
+                models[kind][t_] = (b, proj, n)
 
     def learned(kind):
         def f(e):
-            b, proj = models[kind][e["task"]]
-            X = feats(e, kind, proj)
+            b, proj, n = models[kind][e["task"]]
+            X = feats(e, kind, proj, n)
             return running_max(np.hstack([X, np.ones((len(X), 1))]) @ b)
         return f
 
@@ -320,7 +371,7 @@ for cond in ["obj_0.090", "wristroll_50"]:
         dets[kind] = learned(kind)
 
     res = evaluate(cond, calib, ev, dets)
-    res["_meta"] = {"signals": sigs, "hidden": has_h, "pca": a.pca, "n_calib": len(calib), "n_eval": len(ev),
+    res["_meta"] = {"signals": sigs, "hidden": has_h, "chosen_pca_l2": {k: [list(map(float, c)) for c in v] for k, v in chosen.items()}, "n_calib": len(calib), "n_eval": len(ev),
                     "eval_fail": int(sum(e["fail"] for e in ev)),
                     "D_coef_mean": dict(zip(sigs + ["bias"],
                                             np.mean([models["D-WAC"][t][0] for t in tasks], 0).round(3).tolist()))}
@@ -345,6 +396,7 @@ for cond in ["obj_0.090", "wristroll_50"]:
           {n: [round(x["auroc"], 3) for x in r["alive_auroc"] if x["k"] in (2, 4, 6, 8)]
            for n, r in res.items() if not n.startswith("_")})
     print("D 계수(평균):", res["_meta"]["D_coef_mean"])
+    print("고른 (PCA 차원, L2):", res["_meta"]["chosen_pca_l2"])
 
 os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
 json.dump(out, open(a.out, "w"), indent=1, ensure_ascii=False, default=float)

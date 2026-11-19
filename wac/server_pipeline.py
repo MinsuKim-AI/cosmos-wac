@@ -9,7 +9,7 @@
 2. 정한 크기로 두 조건을 동시에 수집 (calib 10, eval 10, train 5 × 지시문 10개 × 조건 2개 = 500)
 3. 묶음별 result.md, 전체 index.csv, README.md 작성
 
-사용: nohup setsid python server_pipeline.py --gpus 0,1,2,3 --per_gpu 3 > ~/wac_cosmos/pipeline.log 2>&1 &
+사용: nohup setsid python server_pipeline.py --gpus 2,3 --per_gpu 3 > ~/wac_cosmos/pipeline.log 2>&1 &
 상태: ~/wac_cosmos/status.json
 """
 

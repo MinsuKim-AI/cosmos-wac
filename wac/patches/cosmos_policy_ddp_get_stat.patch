@@ -1,0 +1,55 @@
+diff --git a/cosmos_policy/_src/predict2/callbacks/wandb_log.py b/cosmos_policy/_src/predict2/callbacks/wandb_log.py
+index 4ce9a83..e6c4610 100644
+--- a/cosmos_policy/_src/predict2/callbacks/wandb_log.py
++++ b/cosmos_policy/_src/predict2/callbacks/wandb_log.py
+@@ -42,16 +42,17 @@ class _LossRecord:
+         self.edm_loss = 0
+ 
+     def get_stat(self) -> Tuple[float, float]:
+-        if self.iter_count > 0:
+-            avg_loss = self.loss / self.iter_count
+-            avg_edm_loss = self.edm_loss / self.iter_count
+-            dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
+-            dist.all_reduce(avg_edm_loss, op=dist.ReduceOp.AVG)
+-            avg_loss = avg_loss.item()
+-            avg_edm_loss = avg_edm_loss.item()
++        # cosmos-wac 수정: iter_count가 0인 rank도 항상 all_reduce에 참여하게 한다 (rank 사이 통신 순서 엇갈림 방지).
++        def _t(x):
++            return x.detach().float().reshape(()).cuda() if torch.is_tensor(x) else torch.tensor(float(x), device="cuda")
++
++        stat = torch.stack([_t(self.loss), _t(self.edm_loss), torch.tensor(float(self.iter_count), device="cuda")])
++        if dist.is_available() and dist.is_initialized():
++            dist.all_reduce(stat, op=dist.ReduceOp.SUM)
++        if stat[2] > 0:
++            avg_loss, avg_edm_loss = (stat[0] / stat[2]).item(), (stat[1] / stat[2]).item()
+         else:
+-            avg_loss = 0
+-            avg_edm_loss = 0
++            avg_loss, avg_edm_loss = 0, 0
+         self.reset()
+         return avg_loss, avg_edm_loss
+ 
+diff --git a/cosmos_policy/config/callbacks.py b/cosmos_policy/config/callbacks.py
+index eee6257..840a309 100644
+--- a/cosmos_policy/config/callbacks.py
++++ b/cosmos_policy/config/callbacks.py
+@@ -39,12 +39,13 @@ class _LossRecordNoEDM:
+         self.iter_count = 0
+ 
+     def get_stat(self) -> Tuple[float, float]:
+-        if self.iter_count > 0:
+-            avg_loss = self.loss / self.iter_count
+-            dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
+-            avg_loss = avg_loss.item()
+-        else:
+-            avg_loss = 0
++        # cosmos-wac 수정: 원래는 iter_count가 0인 rank가 all_reduce를 건너뛰어, 작은 배치에서 rank끼리
++        # 통신 순서가 엇갈려 멈췄다. 모든 rank가 항상 (합계, 개수)를 all_reduce하고 전체 평균을 낸다.
++        loss = self.loss.detach().float().reshape(()) if torch.is_tensor(self.loss) else torch.tensor(float(self.loss))
++        stat = torch.stack([loss.cuda(), torch.tensor(float(self.iter_count), device="cuda")])
++        if dist.is_available() and dist.is_initialized():
++            dist.all_reduce(stat, op=dist.ReduceOp.SUM)
++        avg_loss = (stat[0] / stat[1]).item() if stat[1] > 0 else 0
+         self.reset()
+         return avg_loss
+ 

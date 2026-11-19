@@ -4,7 +4,7 @@
 슬롯 하나 = GPU 하나 위의 프로세스 하나. 슬롯이 비면 다음 작업을 넣는다.
 
 사용:
-  python parallel_runner.py --gpus 2,3 --per_gpu 4 --jobs jobs.json
+  python parallel_runner.py --gpus 2,3 --per_gpu 3 --jobs jobs.json
 jobs.json: [{"name": "...", "trials": 2, "init_offset": 0, "out": "<묶음 폴더>",
              "args": ["--cam_yaw_deg", "30"], "perturb_seed": 9000, "data_collection": false}, ...]
 """

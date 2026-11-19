@@ -18,7 +18,7 @@ if [ "$MAX_ITER" = "epoch" ]; then
     "$WAC_REPO/data/finetune/wac_v1/dataset.json")
   ACCUM=$(( 32 / (NGPU * LOCAL_BATCH) ))    # 유효 배치 32 = GPU당 배치 × 2 GPU × 누적
   MAX_ITER=$(( SAMPLES / 32 ))
-  SAVE_ITER=$MAX_ITER
+  SAVE_ITER=$(( MAX_ITER / 6 ))             # 1 epoch를 6번 나눠 저장 (체크포인트 하나 3.8GB)
 fi
 SAVE_ITER=${SAVE_ITER:-$MAX_ITER}
 echo "run=$RUN batch=$LOCAL_BATCH max_iter=$MAX_ITER accum=$ACCUM save_iter=$SAVE_ITER (GPU 0,1)"

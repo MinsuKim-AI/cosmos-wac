@@ -28,5 +28,6 @@ for split, start, n, seed in SPLITS:
             if os.path.exists(os.path.join(out, "_logs", name, "DONE")):
                 continue
             jobs.append({"name": name, "trials": 1, "init_offset": init, "out": out,
-                         "args": [*args, "--n_samples", "4", "--hidden", "6,13,20,27"], "perturb_seed": seed})
+                         "args": [*args, "--n_samples", "4", "--hidden", "6,13,20,27"], "perturb_seed": seed,
+                         "data_collection": os.environ.get("WAC_HDF5") == "1"})  # 파인튜닝 모델: 신호 C용 HDF5도 저장
 print(json.dumps(jobs, indent=1))

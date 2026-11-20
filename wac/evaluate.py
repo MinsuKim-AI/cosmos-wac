@@ -348,14 +348,15 @@ for cond in ["obj_0.090", "wristroll_50"]:
     folds = [tasks[i::5] for i in range(5)]
     # D: 모든 정보(WAC 신호 + hidden feature)를 함께. D-WAC, D-hidden은 한쪽을 뺀 비교
     # D-hidden-now / D-hidden-future: hidden을 현재 관측 프레임과 미래 예측 프레임으로 나눈 비교 (Foresight)
-    kinds = ["D", "D-WAC", "D-hidden", "D-hidden-now", "D-hidden-future"] if has_h else ["D-WAC"]
-    HKEY = {"D": "H", "D-hidden": "H", "D-hidden-now": "H_now", "D-hidden-future": "H_fut"}
+    # D-concat: WAC 신호와 hidden PCA 성분을 한 회귀에 바로 넣은 것 (처음 설계, stacking과 비교용)
+    kinds = ["D-concat", "D-WAC", "D-hidden", "D-hidden-now", "D-hidden-future"] if has_h else ["D-WAC"]
+    HKEY = {"D-concat": "H", "D-hidden": "H", "D-hidden-now": "H_now", "D-hidden-future": "H_fut"}
     wac_sigs = [x for x in sigs if x != "O"]
     models = {k: {} for k in kinds}
 
     def feats(e, kind, proj, n):
         parts = []
-        if kind == "D":
+        if kind == "D-concat":
             parts.append(np.nan_to_num(decision_inputs(e, sigs), nan=0.0))       # WAC 신호 + O
         if kind == "D-WAC":
             parts.append(np.nan_to_num(decision_inputs(e, wac_sigs), nan=0.0))
@@ -389,29 +390,62 @@ for cond in ["obj_0.090", "wristroll_50"]:
                 scores[g][1].extend(e["fail"] for e in iva)
         return max(grid, key=lambda g: auroc(np.array(scores[g][0]), np.array(scores[g][1])))
 
+    def chunk_logit(e, kind, b, proj, n):
+        X = feats(e, kind, proj, n)
+        return np.hstack([X, np.ones((len(X), 1))]) @ b
+
+    # D (stacking): D-WAC(+O)와 D-hidden의 chunk별 점수를 함께 받는 2변수 로지스틱 회귀.
+    # 결합 가중치는 학습 묶음 안에서 지시문 단위로 빼고 낸 점수(out-of-fold)로 맞춘다.
+    BASE = ["D-WAC", "D-hidden"] if has_h else []
     chosen = {k: [] for k in kinds}
+    stack = {}
     for fold in folds:
         tr = [e for e in calib if e["task"] not in fold]
+        par = {}
         for kind in kinds:
             proj = pca_fit(np.vstack([e["H"][HKEY[kind]] for e in tr]), max(PCA_GRID)) if kind in HKEY else None
             n, l2 = select(tr, kind)
             chosen[kind].append((n, l2))
+            par[kind] = (n, l2)
             b = fit(tr, kind, proj, n, l2)
             for t_ in fold:
                 models[kind][t_] = (b, proj, n)
+        if BASE:
+            tt = sorted({e["task"] for e in tr})
+            oof = {id(e): [] for e in tr}
+            for kind in BASE:
+                n, l2 = par[kind]   # 기본 모델 설정은 바깥 묶음에서 고른 값을 쓴다
+                for ifold in [tt[i::4] for i in range(4)]:
+                    itr = [e for e in tr if e["task"] not in ifold]
+                    proj = pca_fit(np.vstack([e["H"][HKEY[kind]] for e in itr]), max(PCA_GRID)) if kind in HKEY else None
+                    b = fit(itr, kind, proj, n, l2)
+                    for e in tr:
+                        if e["task"] in ifold:
+                            oof[id(e)].append(chunk_logit(e, kind, b, proj, n))
+            Xs = np.vstack([np.column_stack(oof[id(e)]) for e in tr])
+            ys = np.concatenate([[e["fail"]] * e["K"] for e in tr])
+            ws = np.concatenate([[1 / e["K"]] * e["K"] for e in tr])
+            bs = fit_logreg(Xs, ys, ws, l2=1e-2)
+            for t_ in fold:
+                stack[t_] = bs
 
     def learned(kind):
         def f(e):
             b, proj, n = models[kind][e["task"]]
-            X = feats(e, kind, proj, n)
-            return running_max(np.hstack([X, np.ones((len(X), 1))]) @ b)
+            return running_max(chunk_logit(e, kind, b, proj, n))
         return f
 
     for kind in kinds:
         dets[kind] = learned(kind)
+    if BASE:
+        def stacked(e):
+            Z = np.column_stack([chunk_logit(e, k, *models[k][e["task"]]) for k in BASE])
+            return running_max(np.hstack([Z, np.ones((len(Z), 1))]) @ stack[e["task"]])
+        dets = {"A": dets["A"], "D": stacked, **{k: v for k, v in dets.items() if k != "A"}}
 
     res = evaluate(cond, calib, ev, dets)
-    res["_meta"] = {"signals": sigs, "hidden": has_h, "chosen_pca_l2": {k: [list(map(float, c)) for c in v] for k, v in chosen.items()}, "n_calib": len(calib), "n_eval": len(ev),
+    res["_meta"] = {"signals": sigs, "hidden": has_h,
+                    "D_stack_coef_mean": dict(zip(BASE + ["bias"], np.mean([stack[t] for t in tasks], 0).round(3).tolist())) if BASE else None, "chosen_pca_l2": {k: [list(map(float, c)) for c in v] for k, v in chosen.items()}, "n_calib": len(calib), "n_eval": len(ev),
                     "eval_fail": int(sum(e["fail"] for e in ev)),
                     "D_coef_mean": dict(zip(wac_sigs + ["bias"],
                                             np.mean([models["D-WAC"][t][0] for t in tasks], 0).round(3).tolist()))}
@@ -435,7 +469,7 @@ for cond in ["obj_0.090", "wristroll_50"]:
     print("살아 있는 에피소드끼리 AUROC (k=2,4,6,8):",
           {n: [round(x["auroc"], 3) for x in r["alive_auroc"] if x["k"] in (2, 4, 6, 8)]
            for n, r in res.items() if not n.startswith("_")})
-    print("D 계수(평균):", res["_meta"]["D_coef_mean"])
+    print("D-WAC 계수(평균):", res["_meta"]["D_coef_mean"], " D 결합 계수:", res["_meta"]["D_stack_coef_mean"])
     print("고른 (PCA 차원, L2):", res["_meta"]["chosen_pca_l2"])
 
 os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)

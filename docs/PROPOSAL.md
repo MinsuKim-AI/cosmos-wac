@@ -196,9 +196,9 @@ $\omega_i$는 위의 에피소드 가중치이고 $\lambda$는 정규화 세기�
 | C | 이미지 차이 $d^{\text{img}}$ | chunk 실행 후 | X |
 | F | 미래 예측의 샘플 간 분산 (5.7절) | chunk 실행 전 | X |
 | H | hidden feature: DiT 블록 7, 14, 21, 28번째 출력 (마지막 denoising step, 공간·프레임 평균) | chunk 실행 전 | X |
-| **D (탐지기)** | 결정 시점에 알 수 있는 모든 정보를 함께 넣은 logistic regression: $z_{A,k}, z_{F,k}, z_{B,k-1}, z_{C,k-1}$와 hidden feature의 PCA 32차원 | chunk 실행 전 | O |
+| **D (탐지기)** | 결정 시점에 알 수 있는 모든 정보를 함께 쓰는 stacking: WAC 신호 모델($z_{A,k}, z_{F,k}, z_{O,k}, z_{B,k-1}, z_{C,k-1}$)과 hidden feature 모델(PCA)의 chunk별 점수를 2변수 logistic regression으로 합친다 | chunk 실행 전 | O |
 
-탐지기는 D 하나다. A(가치)는 비교군이고, hidden feature를 뺀 D와 WAC 신호를 뺀 D를 같은 방식으로 학습해 각 정보의 기여를 본다. 관절과 이미지 차이는 chunk를 실행한 뒤에야 나오므로, chunk $k$를 실행할지 정할 때는 직전 chunk의 값을 쓴다. 그래서 오프라인 평가와 실시간 실행이 같은 정보를 쓴다. D는 실패 라벨로 학습하므로 calib으로 학습하고 eval로 평가하며, 지시문 5묶음 교차검증으로 평가하는 지시문을 학습에서 뺀다. PCA와 표준화도 학습 묶음으로만 맞춘다.
+탐지기는 D 하나다. A(가치)는 비교군이고, hidden feature를 뺀 D-WAC와 WAC 신호를 뺀 D-hidden을 같은 방식으로 학습해 각 정보의 기여를 본다. 결합 가중치는 학습 묶음 안에서 지시문 단위로 빼고 낸 점수로 맞춘다. 모든 입력을 한 회귀에 바로 넣는 방식은 calib 100개에 변수가 최대 37개라 불안정해서 비교용(D-concat)으로만 둔다. 관절과 이미지 차이는 chunk를 실행한 뒤에야 나오므로, chunk $k$를 실행할지 정할 때는 직전 chunk의 값을 쓴다. 그래서 오프라인 평가와 실시간 실행이 같은 정보를 쓴다. D는 실패 라벨로 학습하므로 calib으로 학습하고 eval로 평가하며, 지시문 5묶음 교차검증으로 평가하는 지시문을 학습에서 뺀다. PCA와 표준화도 학습 묶음으로만 맞춘다.
 
 ### 5.4 평가 지표
 

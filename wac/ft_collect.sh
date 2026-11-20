@@ -37,3 +37,8 @@ log "C 계산 끝: actual $(find $WAC_F_ROOT -name '*_actual.npz' | wc -l)"
 OMP_NUM_THREADS=8 $PY wac/evaluate.py $WAC_F_ROOT $WAC_STATS results/detection_ft_full.json --f_dir $WAC_F_ROOT > results/detection_ft_full.log 2>&1 \
   && touch $W/FT_EVAL_DONE || { echo FAIL > $W/FT_EVAL_FAIL; log "평가 실패"; }
 log "평가 끝"
+# 비교표와 정성 분석 그림 (노트북 없이 미리 만들어 둔다)
+[ -f $W/FT_EVAL_DONE ] && {
+  $PY wac/compare_models.py results/detection_base_full_v2.json results/detection_ft_full.json results/compare_base_ft.md > results/compare_base_ft.log 2>&1
+  MPLBACKEND=Agg $PY wac/make_figures.py results/detection_ft_full.json $WAC_F_ROOT results/figures_ft --det D > results/figures_ft.log 2>&1
+  log "비교표·그림 끝 (results/compare_base_ft.md, results/figures_ft)"; touch $W/FT_REPORT_DONE; }

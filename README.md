@@ -22,7 +22,7 @@ eval은 교란 조건마다 100 에피소드, 괄호는 95% 신뢰구간이다.
 
 데이터셋은 Hugging Face에 있다.
 
-**[MINSUAI/cosmos-wac-libero-spatial](https://huggingface.co/datasets/MINSUAI/cosmos-wac-libero-spatial)**
+[MINSUAI/cosmos-wac-libero-spatial](https://huggingface.co/datasets/MINSUAI/cosmos-wac-libero-spatial)
 
 LIBERO-Spatial 지시문 10개에 교란을 넣어 모은 에피소드 500개다. 교란 크기는 성공률이 50% 근처가 되도록 직접 재서 정했다.
 

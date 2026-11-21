@@ -417,7 +417,8 @@ H2는 오중단율이 calib에서 정한 수준(약 5%) 근처에 머물면서 �
 | 코드 | [GitHub MinsuKim-AI/cosmos-wac](https://github.com/MinsuKim-AI/cosmos-wac) `wac/` |
 | 데이터셋 | [Hugging Face MINSUAI/cosmos-wac-libero-spatial](https://huggingface.co/datasets/MINSUAI/cosmos-wac-libero-spatial) |
 | 수집 절차와 명령 | [서버 데이터셋 수집](서버_데이터셋.md) |
-| 파인튜닝 절차와 명령 | [서버 4090 파인튜닝](서버_4090_파인튜닝.md) |
+| 파인튜닝 절차와 명령 | [서버 4090 파인튜닝](서버_4090_파인튜닝.md), [파인튜닝 요약](Training.md) |
+| 파인튜닝 모델 수집과 평가 | `wac/ft_collect.sh` (수집, 신호 C, 평가, 비교표, 그림) |
 | 공식 코드 수정 | `wac/patches/cosmos_policy_ddp_get_stat.patch` |
 
 ## 참고문헌

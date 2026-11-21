@@ -28,8 +28,9 @@ hf download MINSUAI/cosmos-wac-libero-spatial --repo-type dataset --local-dir da
 | 문서 | 내용 |
 |---|---|
 | [PROPOSAL.md](docs/PROPOSAL.md) | 과제 제안서. 질문, 신호 정의, 실험 설계, 평가 지표 |
-| [Experiment.md](docs/Experiment.md) | 실험 기록. 교란 크기를 정한 과정과 결과, 데이터셋 구조, 파인튜닝 |
+| [Experiment.md](docs/Experiment.md) | 실험 기록. 교란, 데이터셋, 탐지기, H1~H3 결과 |
 | [서버_데이터셋.md](docs/서버_데이터셋.md) | 서버에서 데이터를 모은 절차와 명령 |
+| [Training.md](docs/Training.md) | 파인튜닝 데이터, 설정, 고친 문제, 결과 |
 | [서버_4090_파인튜닝.md](docs/서버_4090_파인튜닝.md) | RTX 4090 두 장에서 LoRA로 파인튜닝하는 방법 |
 | [cosmos-policy-overview.md](docs/cosmos-policy-overview.md) | Cosmos Policy와 diffusion의 동작 원리 |
 
@@ -42,7 +43,12 @@ hf download MINSUAI/cosmos-wac-libero-spatial --repo-type dataset --local-dir da
 | `perturbed_eval.py` | 공식 LIBERO 평가에 교란, 실시간 화면, 추론마다의 예측 저장, 에피소드 정리를 붙인 실행기 |
 | `server_pipeline.py`, `parallel_runner.py` | 서버에서 교란 크기 찾기와 수집을 여러 GPU로 동시에 돌림 |
 | `summarize_split.py` | 묶음별 요약과 전체 목록(`index.csv`) 작성 |
-| `run_lora.sh` | 서버 4090 두 장에서 LoRA 파인튜닝 |
+| `encode_actual.py` | 실제 미래 이미지를 VAE로 인코딩해 신호 C 계산 |
+| `evaluate.py` | 보정, 탐지기 A~D 학습(과제 단위 교차검증), AUROC와 중단 지표 |
+| `make_figures.py` | 조기 탐지, 놓친 실패, 잘못 멈춘 성공 사례 그림 |
+| `compare_models.py` | 기본 모델과 파인튜닝 모델의 탐지 비교표 (H3) |
+| `run_lora.sh`, `merge_lora.py` | 서버 4090 두 장에서 LoRA 파인튜닝, LoRA를 원래 가중치에 합치기 |
+| `ft_collect.sh` | 파인튜닝 모델 수집부터 평가, 비교표, 그림까지 한 번에 |
 | `patches/` | 두 GPU 학습이 멈추던 공식 코드의 로그 집계 문제를 고친 패치 |
 
 ## 진행 상황
@@ -50,5 +56,8 @@ hf download MINSUAI/cosmos-wac-libero-spatial --repo-type dataset --local-dir da
 | 단계 | 상태 |
 |---|---|
 | 교란 크기 정하기, 데이터 수집 | 끝남 (500 에피소드, Hugging Face 공개) |
-| 파인튜닝 (LoRA, 1 epoch) | 진행 중 |
-| WAC 신호 계산과 실패 탐지 평가 | 예정 |
+| hidden feature, WAC 신호 수집 | 끝남 (calib, eval 400 에피소드) |
+| 실패 탐지 H1 | 물체 이동 지지 (D 0.982, A 0.612), 손목 회전 지지 안 됨 |
+| 조기 중단 H2 | 물체 이동 지지 (오중단 0%, 실패 동작 27% 줄임), 손목 회전 지지 안 됨 |
+| 파인튜닝 (LoRA, 1 epoch) | 끝남 |
+| 두 모델 비교 H3 | 지지 안 됨 (손목 회전 D +0.108, 구간이 0 포함) |

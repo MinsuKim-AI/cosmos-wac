@@ -1,8 +1,22 @@
 # cosmos-wac
 
-Diffusion 기반 로봇 정책 Cosmos Policy가 스스로 예측한 미래와 실제로 일어난 일을 비교해서, 실패를 미리 알아챌 수 있는지 확인하는 수업 과제다.
+Diffusion 기반 로봇 정책 Cosmos Policy의 내부 hidden feature와 World-Action Consistency(WAC)를 써서 실패를 미리 알아채고, 알아챈 순간 동작을 멈추는 실패 탐지 시스템이다. Diffusion Model 수업 개인 과제다.
 
-Cosmos Policy(`nvidia/Cosmos-Policy-LIBERO-Predict2-2B`)는 행동을 정할 때 16 step 뒤의 카메라 화면, 관절 상태, 가치도 함께 생성한다. 이 예측과 16 step 뒤 실제 관측의 차이를 WAC(World-Action Consistency) 점수라고 부르고, 이 점수가 실패할 에피소드를 성공할 에피소드와 구분하는지, 정책이 원래 내는 가치 예측보다 더 잘 또는 더 일찍 구분하는지를 본다. 실험은 LIBERO-Spatial 시뮬레이션에서 한다.
+Cosmos Policy(`nvidia/Cosmos-Policy-LIBERO-Predict2-2B`)는 행동을 정할 때 16 step 뒤의 카메라 화면, 관절 상태, 가치도 함께 생성한다. 이 예측과 16 step 뒤 실제 관측의 차이(WAC), 초기 노이즈만 바꾼 샘플 사이의 흩어짐, DiT 블록의 hidden feature를 chunk마다 모아 탐지기 D가 실패 확률을 낸다. 비교 기준은 정책이 원래 내는 가치 예측이다. 실험은 LIBERO-Spatial 시뮬레이션에서 한다.
+
+## 결과
+
+eval은 교란 조건마다 100 에피소드, 괄호는 95% 신뢰구간이다.
+
+| | 물체 위치 ±9cm | 손목 카메라 회전 ±50° |
+|---|---|---|
+| 탐지 AUROC (D / 가치) | 0.982 [0.958, 0.998] / 0.612 | 0.779 [0.681, 0.869] / 0.692 |
+| D가 경고한 순간 멈출 때 | 성공 에피소드를 하나도 멈추지 않고 실패 에피소드 동작 27% 줄임 | 성공 에피소드 13%를 잘못 멈춤 |
+| 파인튜닝 모델의 D | 0.991 | 0.887 (가치 대비 +0.114 [+0.002, +0.226]) |
+
+물체 위치 교란에서는 탐지와 조기 중단 모두 가설이 지지됐고, 탐지력은 대부분 hidden feature에서 나왔다. 손목 카메라 회전에서는 공개 모델 기준으로 지지되지 않았고, WAC 신호와 미래 프레임 hidden이 더 나았다. 파인튜닝 후 두 조건 모두 D가 올랐지만 차이의 신뢰구간이 0을 포함했다. 자세한 내용은 [Experiment.md](docs/Experiment.md)에 있다.
+
+![물체 위치 교란에서 일찍 멈춘 예](docs/figures/obj_0.090_early_detect.png)
 
 ## 데이터셋
 
@@ -27,7 +41,7 @@ hf download MINSUAI/cosmos-wac-libero-spatial --repo-type dataset --local-dir da
 
 | 문서 | 내용 |
 |---|---|
-| [PROPOSAL.md](docs/PROPOSAL.md) | 과제 제안서. 질문, 신호 정의, 실험 설계, 평가 지표 |
+| [PROPOSAL.md](docs/PROPOSAL.md) | 과제 제안서. 질문, 신호 정의, 실험 설계, 평가 지표, 결과 요약 |
 | [Experiment.md](docs/Experiment.md) | 실험 기록. 교란, 데이터셋, 탐지기, H1~H3 결과 |
 | [서버_데이터셋.md](docs/서버_데이터셋.md) | 서버에서 데이터를 모은 절차와 명령 |
 | [Training.md](docs/Training.md) | 파인튜닝 데이터, 설정, 고친 문제, 결과 |

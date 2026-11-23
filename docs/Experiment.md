@@ -241,11 +241,11 @@ calib 성공 에피소드의 최종 점수 R의 95% 분위수를 임계값으로
 
 ### 5.5 탐지기 D
 
-chunk k를 실행하기 직전에 알 수 있는 정보를 모두 함께 쓰는 탐지기다. 가치, 샘플 간 흩어짐, hidden 분포 이탈은 이번 chunk 값(A_k, F_k, O_k), 관절과 이미지 차이는 직전 chunk 값(B_{k−1}, C_{k−1})을 쓴다. 그래서 오프라인 평가가 실시간으로 돌렸을 때와 같은 정보만 쓴다.
+chunk k를 실행하기 직전에 알 수 있는 정보를 모두 함께 쓰는 탐지기다. 가치, 샘플 간 흩어짐, hidden feature는 이번 chunk 값(A_k, F_k, H_k), 관절과 이미지 차이는 직전 chunk 값(B_{k−1}, C_{k−1})을 쓴다. 그래서 오프라인 평가가 실시간으로 돌렸을 때와 같은 정보만 쓴다.
 
-D는 두 단계로 만든다(stacking). 먼저 WAC 신호의 z-score를 넣은 logistic regression(D-WAC)과 hidden feature를 PCA로 줄여 넣은 logistic regression(D-hidden)을 따로 학습한다. 다음으로 두 모델이 chunk마다 낸 점수를 입력으로 받는 2변수 logistic regression이 둘을 합친다. 결합 가중치는 학습 묶음 안에서 지시문 단위로 빼고 낸 점수(out-of-fold)로 맞춰, 자기 학습 데이터에서 부풀려진 점수에 기대지 않게 한다.
+D는 두 단계로 만든다(stacking). 먼저 WAC 신호의 z-score(A_k, F_k, B_{k−1}, C_{k−1})를 넣은 logistic regression(D-WAC)과 hidden feature를 PCA로 줄여 넣은 logistic regression(D-hidden)을 따로 학습한다. 다음으로 두 모델이 chunk마다 낸 점수를 입력으로 받는 2변수 logistic regression이 둘을 합친다. 결합 가중치는 학습 묶음 안에서 지시문 단위로 빼고 낸 점수(out-of-fold)로 맞춰, 자기 학습 데이터에서 부풀려진 점수에 기대지 않게 한다.
 
-처음에는 WAC 신호와 hidden PCA 성분을 한 회귀에 바로 넣었다(D-concat). 이 방식은 변수가 최대 37개인데 calib이 조건마다 100개(지시문 10개)라, 성분을 잘 쓰는 D-hidden이나 D-WAC보다 낮게 나왔다. stacking은 이럴 때 쓰기로 미리 정해 둔 대안이고, D-concat은 비교용으로 결과에 남긴다. hidden 쪽은 현재 프레임만 쓴 D-hidden-now, 미래 프레임만 쓴 D-hidden-future도 같은 방식으로 학습해 비교한다.
+처음에는 WAC 신호, hidden 분포 이탈 O, hidden PCA 성분을 한 회귀에 바로 넣었다(D-concat). O는 D-concat에만 들어가고 D에는 쓰이지 않는다. 이 방식은 변수가 최대 37개인데 calib이 조건마다 100개(지시문 10개)라, 성분을 잘 쓰는 D-hidden이나 D-WAC보다 낮게 나왔다. stacking은 이럴 때 쓰기로 미리 정해 둔 대안이고, D-concat은 비교용으로 결과에 남긴다. hidden 쪽은 현재 프레임만 쓴 D-hidden-now, 미래 프레임만 쓴 D-hidden-future도 같은 방식으로 학습해 비교한다.
 
 PCA 차원(4, 8, 16, 32)과 L2 세기(0.01, 0.1, 1, 10)는 학습 묶음 안의 지시문 단위 4묶음 내부 교차검증 AUROC로 고른다. PCA와 표준화도 학습 묶음의 calib으로만 맞춘다. 실패 라벨로 학습하므로 calib으로 학습하고 eval로 평가한다. 지시문 10개를 5묶음으로 나눠, 평가하는 지시문은 학습에서 뺀다. 같은 지시문이 학습과 평가에 같이 들어가면 그 지시문의 특징을 외워 성능이 부풀려지기 때문이다. 실패 에피소드는 최대 길이까지 가서 chunk가 많으므로 chunk마다 1/(그 에피소드의 chunk 수) 가중치를 준다. 임계값은 각 묶음의 모델로 만든 calib 성공 에피소드 점수에서 같은 방식으로 정한다.
 

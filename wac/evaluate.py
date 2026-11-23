@@ -12,6 +12,7 @@
       표본 5개 미만이면 같은 지시문의 k 이하 순번, 그래도 부족하면 같은 k의 모든 지시문을 합친다.
       σ 하한 = calib 성공 전체 σ의 10%.
 점수: R_k = 결정 시점 k까지 알 수 있는 z의 최댓값 (비교군 A).
+비교군 T: chunk 순번 k를 점수로 쓰므로 R_k = k (1부터 시작).
 WAC 입력: 결정 시점 k의 [z_A,k, z_F,k, z_B,k−1, z_C,k−1] (z-score).
      calib으로 학습, 지시문 5묶음 교차검증(평가 지시문은 학습에서 뺌), 에피소드마다 무게가 같게.
 D-WAC, D-hidden: D에서 hidden feature 또는 WAC 신호를 뺀 비교 (정보별 기여 확인).
@@ -29,6 +30,7 @@ import argparse
 import glob
 import json
 import os
+import re
 
 import numpy as np
 
@@ -40,9 +42,21 @@ p.add_argument("--f_dir", default="")
 p.add_argument("--boot", type=int, default=2000)
 p.add_argument("--pca", type=int, default=32)
 p.add_argument("--only_with_f", action="store_true", help="F, hidden이 있는 에피소드만 쓴다 (수집 중 시험용)")
+p.add_argument("--confirm_split", help="고정된 탐지기로 추가 평가할 별도 묶음 (예: train)")
+p.add_argument("--confirm_out", help="확인 평가 결과 JSON 경로")
 a = p.parse_args()
+if bool(a.confirm_split) != bool(a.confirm_out):
+    p.error("--confirm_split과 --confirm_out을 함께 지정해야 합니다.")
+if a.confirm_split:
+    if (a.confirm_split.lower() in {".", "..", "calib", "eval"}
+            or os.path.basename(a.confirm_split) != a.confirm_split):
+        p.error("--confirm_split은 calib, eval과 다른 묶음 폴더 이름이어야 합니다.")
+    if os.path.normcase(os.path.realpath(a.out)) == os.path.normcase(os.path.realpath(a.confirm_out)):
+        p.error("--confirm_out은 기본 평가 출력 경로와 달라야 합니다.")
 
 CHUNK, MIN_N, FLOOR_FRAC, Q = 16, 5, 0.10, 0.95
+WAIT_STEPS, POLICY_STEPS = 10, 220
+BOOT_REPS = 2000
 rng = np.random.default_rng(0)
 st = json.load(open(a.stats))
 PMIN, PMAX = np.array(st["proprio_min"]), np.array(st["proprio_max"])
@@ -54,6 +68,7 @@ def load_split(root, cond, split):
     eps = []
     for jl in sorted(glob.glob(os.path.join(root, cond, split, "D*", "episodes.jsonl"))):
         d = os.path.dirname(jl)
+        task_dir = os.path.basename(d)
         # 중단 후 다시 돌린 작업은 같은 에피소드를 다시 적으므로 마지막 기록만 쓴다
         recs = {}
         for line in open(jl, encoding="utf-8"):
@@ -61,7 +76,12 @@ def load_split(root, cond, split):
                 r = json.loads(line)
                 recs[r["episode"]] = r
         for e in recs.values():
-            z = np.load(os.path.join(d, e["episode"] + ".npz"))
+            episode = e["episode"]
+            name = f"{cond}/{split}/{task_dir}/{episode}"
+            init = re.match(r"init(\d+)_", episode)
+            if init is None:
+                raise ValueError(f"초기 상태 번호가 없는 에피소드 이름: {name}")
+            z = np.load(os.path.join(d, episode + ".npz"))
             t = z["chunk_t"].astype(int)
             K = len(t)
             A = 1 - z["value"].astype(float)
@@ -71,7 +91,7 @@ def load_split(root, cond, split):
                 if t[k] + CHUNK < len(prop):
                     B[k] = np.linalg.norm(z["future_proprio_norm"][k] - norm_p(prop[t[k] + CHUNK]))
             C = np.full(K, np.nan)
-            act = os.path.join(d, e["episode"] + "_actual.npz")
+            act = os.path.join(d, episode + "_actual.npz")
             if os.path.exists(act):
                 za = np.load(act)
                 pos = {int(tt): i for i, tt in enumerate(za["chunk_t"])}
@@ -81,7 +101,7 @@ def load_split(root, cond, split):
             F = np.full(K, np.nan)
             H = None
             if a.f_dir:
-                fz = os.path.join(a.f_dir, cond, split, os.path.basename(d), e["episode"] + ".npz")
+                fz = os.path.join(a.f_dir, cond, split, task_dir, episode + ".npz")
                 if os.path.exists(fz):
                     zf = np.load(fz)
                     if np.array_equal(zf["chunk_t"], z["chunk_t"]):
@@ -95,9 +115,10 @@ def load_split(root, cond, split):
                             H = {"H": hz.mean(axis=2).reshape(K, -1),        # 모든 프레임
                                  "H_now": hz[:, :, 1:4].mean(axis=2).reshape(K, -1),   # 현재 관절·손목·3인칭
                                  "H_fut": hz[:, :, 5:9].mean(axis=2).reshape(K, -1)}   # 미래 관절·손목·3인칭·가치
-            eps.append({"task": e["task_id"], "fail": int(not e["success"]), "K": K, "t": t,
+            eps.append({"name": name, "task": e["task_id"], "init": int(init[1]),
+                        "fail": int(not e["success"]), "K": K, "t": t,
                         "T_end": len(prop) - 1, "H": H,
-                        "sig": {"A": A, "B": B, "C": C, "F": F}, "name": f"{cond}/{split}/{e['episode']}"})
+                        "sig": {"A": A, "B": B, "C": C, "F": F}})
     return eps
 
 
@@ -199,22 +220,126 @@ def auprc(s, y):
     return float((prec * yy).sum() / max(yy.sum(), 1))
 
 
-def ci(stat_fn, idx_n):
-    vals = [stat_fn(rng.integers(0, idx_n, idx_n)) for _ in range(a.boot)]
+def ci(stat_fn, idx_n, generator):
+    vals = [stat_fn(generator.integers(0, idx_n, idx_n)) for _ in range(a.boot)]
     vals = np.array([v for v in vals if np.isfinite(v)])
     return [float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5))] if len(vals) else [np.nan, np.nan]
 
 
-def evaluate(cond, calib, ev, detectors):
+def percentile_ci(vals):
+    vals = vals[np.isfinite(vals)]
+    return np.percentile(vals, [2.5, 97.5]).tolist() if len(vals) else None
+
+
+def bootstrap_aurocs(scores, y, generator):
+    # 모든 탐지기에 같은 에피소드 표본을 적용한다. 표본 안의 중복 횟수로 순위쌍에 가중치를 준다.
+    indices = generator.integers(len(y), size=(BOOT_REPS, len(y)))
+    counts = np.zeros((BOOT_REPS, len(y)))
+    np.add.at(counts, (np.arange(BOOT_REPS)[:, None], indices), 1)
+    fails = y == 1
+    pos, neg = counts[:, fails], counts[:, ~fails]
+    pairs = pos.sum(axis=1) * neg.sum(axis=1)
+    valid = pairs > 0
+    pos, neg, pairs = pos[valid], neg[valid], pairs[valid]
+    out = {}
+    for name, s in scores.items():
+        d = s[fails, None] - s[None, ~fails]
+        wins = (d > 0) + 0.5 * (d == 0)
+        out[name] = ((pos @ wins) * neg).sum(axis=1) / pairs
+    return out
+
+
+def alive_statistics(y, lengths, trajectories, generator):
+    out = {name: [] for name in trajectories}
+    for k in range(1, max(lengths) + 1):
+        idx = np.flatnonzero(lengths >= k)
+        labels = y[idx]
+        n_fail = int(labels.sum())
+        n_success = len(idx) - n_fail
+        stats = {}
+        samples = {}
+        if min(n_success, n_fail) >= MIN_N:
+            scores = {name: np.nan_to_num(np.array([R[i][k - 1] for i in idx]), neginf=-1e9)
+                      for name, R in trajectories.items()}
+            stats = {name: auroc(s, labels) for name, s in scores.items()}
+            samples = bootstrap_aurocs(scores, labels, generator)
+        for name in trajectories:
+            row = {"k": k, "n_success": n_success, "n_fail": n_fail,
+                   "auroc": stats.get(name), "auroc_ci": percentile_ci(samples[name]) if samples else None}
+            for baseline in ("A", "T"):
+                key = f"auroc_minus_{baseline}"
+                row[key] = stats[name] - stats[baseline] if stats else None
+                row[key + "_ci"] = percentile_ci(samples[name] - samples[baseline]) if samples else None
+            out[name].append(row)
+    return out
+
+
+def wilson_ci(hits, n):
+    if not n:
+        return None
+    z = 1.959963984540054
+    p_hat = hits / n
+    scale = 1 + z ** 2 / n
+    center = (p_hat + z ** 2 / (2 * n)) / scale
+    radius = z * (p_hat * (1 - p_hat) / n + z ** 2 / (4 * n ** 2)) ** 0.5 / scale
+    return [max(0.0, center - radius), min(1.0, center + radius)]
+
+
+def stop_counts(stopped, fails):
+    n_fail = int(fails.sum())
+    n_success = len(fails) - n_fail
+    n_false_stops = int((stopped & ~fails).sum())
+    n_detected = int((stopped & fails).sum())
+    return {"n_success": n_success, "n_fail": n_fail, "n_false_stops": n_false_stops, "n_detected": n_detected,
+            "false_alarm_ci": wilson_ci(n_false_stops, n_success), "detection_rate_ci": wilson_ci(n_detected, n_fail)}
+
+
+def add_saved_fraction_stats(results, saved, fail_steps, generator):
+    n_fail = len(fail_steps)
+    # 이미 실행한 step = 종료 step - 절감 step. 양쪽에서 대기 구간을 빼고 정책 step의 차이를 잰다.
+    policy_end = np.maximum(fail_steps - WAIT_STEPS, 0)
+    policy_saved = {name: policy_end - np.maximum(fail_steps - sv - WAIT_STEPS, 0) for name, sv in saved.items()}
+    indices = generator.integers(n_fail, size=(BOOT_REPS, n_fail)) if n_fail else None
+    denominators = fail_steps[indices].sum(axis=1) if indices is not None else None
+    policy_key = "saved_fraction_of_failure_policy_steps"
+    policy_total = POLICY_STEPS * n_fail
+    for name, sv in policy_saved.items():
+        results[name][policy_key] = float(sv.sum() / policy_total) if policy_total else None
+    for key, values, total, boot_totals in (
+            ("saved_fraction_of_failure_steps", saved, fail_steps.sum(), denominators),
+            (policy_key, policy_saved, policy_total, policy_total)):
+        for name, sv in values.items():
+            r = results[name]
+            for baseline in ("A", "T"):
+                delta = sv - values[baseline]
+                diff_key = f"{key}_minus_{baseline}"
+                r[diff_key] = float(delta.sum() / total) if total else None
+                r[diff_key + "_ci"] = percentile_ci(delta[indices].sum(axis=1) / boot_totals) if total else None
+
+
+def evaluate(cond, calib, ev, detectors, *, reference=None):
+    if not ev:
+        raise ValueError(f"{cond}: 평가 에피소드가 없습니다.")
     y = np.array([e["fail"] for e in ev])
     fails = y == 1
     res, finals = {}, {}
-    maxK = max(e["K"] for e in ev)
+    lengths = np.array([e["K"] for e in ev])
+    maxK = max(lengths)
+    fail_steps = np.array([e["T_end"] for e in ev if e["fail"]], dtype=float)
+    trajectories, saved_steps, saved_steps_tv = {}, {}, {}
+    bootstrap_rng = np.random.default_rng(1)
+    new_summary_rng = np.random.default_rng(2)
     for name, score_fn in detectors.items():
-        cal_final = np.array([score_fn(e)[-1] for e in calib if not e["fail"]])
-        cal_final = cal_final[np.isfinite(cal_final)]
-        tau = float(np.quantile(cal_final, Q)) if len(cal_final) else np.inf
+        summary_rng = rng if reference is None and name != "T" else new_summary_rng
+        if reference is None:
+            cal_R = [score_fn(e) for e in calib if not e["fail"]]
+            cal_final = np.array([r[-1] for r in cal_R])
+            cal_final = cal_final[np.isfinite(cal_final)]
+            tau = float(np.quantile(cal_final, Q)) if len(cal_final) else np.inf
+        else:
+            tau = reference[name]["threshold"]
         R = [score_fn(e) for e in ev]
+        trajectories[name] = R
         final = np.array([r[-1] for r in R])
         finals[name] = final
         det_k = [int(np.argmax(r > tau)) if (r > tau).any() else None for r in R]   # 0부터 센 chunk 순번
@@ -229,12 +354,12 @@ def evaluate(cond, calib, ev, detectors):
         stopped = np.array([s is not None for s in stop_t])
         saved = np.array([(ev[i]["T_end"] - stop_t[i]) if (fails[i] and stopped[i]) else 0
                           for i in range(len(ev))], dtype=float)
-        fail_steps = np.array([ev[i]["T_end"] for i in range(len(ev)) if fails[i]], dtype=float)
+        saved_steps[name] = saved[fails]
         f = np.nan_to_num(final, neginf=-1e9)
         det_steps = [stop_t[i] for i in range(len(ev)) if fails[i] and stopped[i]]
         res[name] = {
-            "auroc": auroc(f, y), "auroc_ci": ci(lambda i: auroc(f[i], y[i]), len(y)),
-            "auprc": auprc(f, y), "auprc_ci": ci(lambda i: auprc(f[i], y[i]), len(y)),
+            "auroc": auroc(f, y), "auroc_ci": ci(lambda i: auroc(f[i], y[i]), len(y), summary_rng),
+            "auprc": auprc(f, y), "auprc_ci": ci(lambda i: auprc(f[i], y[i]), len(y), summary_rng),
             "threshold": tau,
             "false_alarm": float(stopped[~fails].mean()),
             "detection_rate": float(stopped[fails].mean()),
@@ -247,43 +372,62 @@ def evaluate(cond, calib, ev, detectors):
             "success_rate_before": float((~fails).mean()),
             "success_rate_after_stop": float(((~fails) & ~stopped).mean()),
             "alive_auroc": alive,
+            **stop_counts(stopped, fails),
         }
-        # 시점별 임계값 (SAFE, FAIL-Detect의 time-varying conformal band): chunk 순번 k마다
-        # calib 성공 에피소드의 R_k 95% 분위수. 이미 끝난 에피소드는 마지막 점수를 유지한다.
-        cal_R = [score_fn(e) for e in calib if not e["fail"]]
-        # 띠 전체로 calib 성공 에피소드의 95%가 한 번도 넘지 않도록, chunk별 분위수 수준 q를 올려 가며 고른다
-        def band(q):
-            return np.array([np.quantile([r[min(k, len(r) - 1)] for r in cal_R], q) for k in range(maxK)])
+        if reference is None:
+            # 종료한 성공 에피소드는 마지막 점수를 이월한다. 띠 전체의 초과율이 5% 이하가 될 때까지 q를 올린다.
+            def band(q):
+                return np.array([np.quantile([r[min(k, len(r) - 1)] for r in cal_R], q) for k in range(maxK)])
 
-        def crossing(tk):
-            return np.mean([any(r[k] > tk[min(k, maxK - 1)] for k in range(len(r))) for r in cal_R])
+            def crossing(tk):
+                return np.mean([any(r[k] > tk[min(k, maxK - 1)] for k in range(len(r))) for r in cal_R])
 
-        q_band = next((q for q in np.arange(Q, 1.0001, 0.0025) if crossing(band(min(q, 1.0))) <= 1 - Q), 1.0)
-        tau_k = band(min(q_band, 1.0))
-        det_tv = [next((k for k in range(len(r)) if r[k] > tau_k[min(k, maxK - 1)]), None) for r in R]
+            q_band = next((q for q in np.arange(Q, 1.0001, 0.0025) if crossing(band(min(q, 1.0))) <= 1 - Q), 1.0)
+            q_band = min(q_band, 1.0)
+            tau_k = band(q_band)
+        else:
+            q_band = reference[name]["time_varying"]["band_quantile"]
+            tau_k = np.array(reference[name]["threshold_k"])
+        det_tv = [next((k for k in range(len(r)) if r[k] > tau_k[min(k, len(tau_k) - 1)]), None) for r in R]
         st_tv = [int(ev[i]["t"][d]) if d is not None else None for i, d in enumerate(det_tv)]
         stp = np.array([s is not None for s in st_tv])
         sv = np.array([(ev[i]["T_end"] - st_tv[i]) if (fails[i] and stp[i]) else 0 for i in range(len(ev))], float)
+        saved_steps_tv[name] = sv[fails]
         dsteps = [st_tv[i] for i in range(len(ev)) if fails[i] and stp[i]]
         res[name]["time_varying"] = {
             "false_alarm": float(stp[~fails].mean()), "detection_rate": float(stp[fails].mean()),
             "median_detect_step": float(np.median(dsteps)) if dsteps else None,
             "saved_fraction_of_failure_steps": float(sv[fails].sum() / fail_steps.sum()),
             "success_rate_after_stop": float(((~fails) & ~stp).mean()),
-            "band_quantile": float(min(q_band, 1.0)),
+            "band_quantile": float(q_band),
+            **stop_counts(stp, fails),
         }
-        # 정성 분석 그림용: 에피소드별 점수 곡선과 중단 시점 (A와 D만)
-        if name in ("A", "D", "D-WAC"):
-            res[name]["threshold_k"] = tau_k.tolist()
-            res[name]["episodes"] = [{"name": ev[i]["name"], "fail": int(fails[i]), "t": ev[i]["t"].tolist(),
-                                      "R": np.nan_to_num(R[i], neginf=-99).tolist(), "stop_t": stop_t[i]}
-                                     for i in range(len(ev))]
+        res[name]["threshold_k"] = tau_k.tolist()
+        res[name]["episodes"] = [
+            {"name": e["name"], "task": e["task"], "init": e["init"], "fail": e["fail"], "t": e["t"].tolist(),
+             "R": np.nan_to_num(r, neginf=-99).tolist(), "stop_t": st, "stop_t_tv": stv}
+            for e, r, st, stv in zip(ev, R, stop_t, st_tv)
+        ]
+    finals = {name: np.nan_to_num(final, neginf=-1e9) for name, final in finals.items()}
     for name in detectors:
         if name == "A":
             continue
-        fa, fb = np.nan_to_num(finals["A"], neginf=-1e9), np.nan_to_num(finals[name], neginf=-1e9)
+        fa, fb = finals["A"], finals[name]
+        summary_rng = rng if reference is None and name != "T" else new_summary_rng
         res[name]["auroc_minus_A"] = auroc(fb, y) - auroc(fa, y)
-        res[name]["auroc_minus_A_ci"] = ci(lambda i: auroc(fb[i], y[i]) - auroc(fa[i], y[i]), len(y))
+        res[name]["auroc_minus_A_ci"] = ci(lambda i: auroc(fb[i], y[i]) - auroc(fa[i], y[i]), len(y), summary_rng)
+
+    # 기존 alive_auroc의 추정값도 보존하고, 최소 표본 수를 적용한 시점별 추론 결과를 함께 저장한다.
+    alive = alive_statistics(y, lengths, trajectories, bootstrap_rng)
+    final_samples = bootstrap_aurocs(finals, y, bootstrap_rng)
+    for name in detectors:
+        res[name]["alive_auroc_bootstrap"] = alive[name]
+        diff = res[name]["auroc"] - res["T"]["auroc"]
+        res[name]["auroc_minus_T"] = diff if np.isfinite(diff) else None
+        res[name]["auroc_minus_T_ci"] = percentile_ci(final_samples[name] - final_samples["T"])
+    add_saved_fraction_stats(res, saved_steps, fail_steps, bootstrap_rng)
+    add_saved_fraction_stats({name: r["time_varying"] for name, r in res.items()}, saved_steps_tv, fail_steps,
+                             bootstrap_rng)
     return res
 
 
@@ -301,7 +445,7 @@ L2_GRID = [1e-2, 1e-1, 1.0, 10.0]
 
 
 # ---------------- 실행 ----------------
-out = {}
+out, confirm_out = {}, {}
 for cond in ["obj_0.090", "wristroll_50"]:
     calib, ev = load_split(a.data_dir, cond, "calib"), load_split(a.data_dir, cond, "eval")
     if a.only_with_f:
@@ -442,6 +586,7 @@ for cond in ["obj_0.090", "wristroll_50"]:
             Z = np.column_stack([chunk_logit(e, k, *models[k][e["task"]]) for k in BASE])
             return running_max(np.hstack([Z, np.ones((len(Z), 1))]) @ stack[e["task"]])
         dets = {"A": dets["A"], "D": stacked, **{k: v for k, v in dets.items() if k != "A"}}
+    dets["T"] = lambda e: np.arange(1, e["K"] + 1)
 
     res = evaluate(cond, calib, ev, dets)
     res["_meta"] = {"signals": sigs, "hidden": has_h,
@@ -472,6 +617,31 @@ for cond in ["obj_0.090", "wristroll_50"]:
     print("D-WAC 계수(평균):", res["_meta"]["D_coef_mean"], " D 결합 계수:", res["_meta"]["D_stack_coef_mean"])
     print("고른 (PCA 차원, L2):", res["_meta"]["chosen_pca_l2"])
 
+    if a.confirm_split:
+        confirm = load_split(a.data_dir, cond, a.confirm_split)
+        if a.only_with_f:
+            confirm = [e for e in confirm if e["H"] is not None]
+        if not confirm:
+            raise ValueError(f"{cond}/{a.confirm_split}: 확인 평가 에피소드가 없습니다.")
+        for e in confirm:
+            if e["task"] not in tasks:
+                raise ValueError(f"{e['name']}: calib에 해당 과제의 fold 모델이 없습니다.")
+            if (has_h and e["H"] is None) or (has_f and not np.isfinite(e["sig"]["F"]).any()):
+                raise ValueError(f"{e['name']}: 고정된 탐지기에 필요한 F 또는 hidden 데이터가 없습니다.")
+            if has_h:
+                e["sig"]["O"] = full(e)
+        zscores(confirm, calib, sigs)
+        confirm_res = evaluate(cond, calib, confirm, dets, reference=res)
+        confirm_res["_meta"] = {**res["_meta"], "n_eval": len(confirm), "eval_fail": sum(e["fail"] for e in confirm)}
+        confirm_out[cond] = confirm_res
+        print(f"확인 평가 {cond}/{a.confirm_split}: {len(confirm)}개 (실패 {confirm_res['_meta']['eval_fail']})")
+
 os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
-json.dump(out, open(a.out, "w"), indent=1, ensure_ascii=False, default=float)
+with open(a.out, "w", encoding="utf-8") as f:
+    json.dump(out, f, indent=1, ensure_ascii=False, default=float)
 print("\n저장:", a.out)
+if a.confirm_split:
+    os.makedirs(os.path.dirname(a.confirm_out) or ".", exist_ok=True)
+    with open(a.confirm_out, "w", encoding="utf-8") as f:
+        json.dump(confirm_out, f, indent=1, ensure_ascii=False, default=float)
+    print("확인 평가 저장:", a.confirm_out)

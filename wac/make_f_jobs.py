@@ -15,6 +15,8 @@ import sys
 ROOT = os.path.expanduser(os.environ.get("WAC_F_ROOT", "~/wac_cosmos/repo/data/libero_spatial_F"))  # 파인튜닝 모델은 다른 폴더
 CONDITIONS = {"obj_0.090": ["--obj_xy_noise", "0.09"], "wristroll_50": ["--wrist_roll_deg", "50"]}
 SPLITS = [("calib", 10, 10, 2), ("eval", 20, 10, 3)]
+if os.environ.get("WAC_F_SPLITS") == "train":   # 확인 평가용: 탐지에 쓰지 않은 train 묶음(초기 상태 0~4, seed 1)
+    SPLITS = [("train", 0, 5, 1)]
 only = sys.argv[1:]  # 예: calib_i10 하나만 (시험용)
 
 jobs = []

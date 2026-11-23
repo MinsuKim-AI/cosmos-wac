@@ -41,6 +41,7 @@ hf download MINSUAI/cosmos-wac-libero-spatial --repo-type dataset --local-dir da
 
 | 문서 | 내용 |
 |---|---|
+| [최종보고서.docx](docs/최종보고서.docx) | 제출용 결과 보고서 (A4 3쪽). 주제, 기존 방법, 접근과 AI 활용, 결과 |
 | [PROPOSAL.md](docs/PROPOSAL.md) | 과제 제안서. 질문, 신호 정의, 실험 설계, 평가 지표, 결과 요약 |
 | [Experiment.md](docs/Experiment.md) | 실험 기록. 교란, 데이터셋, 탐지기, H1~H3 결과 |
 | [서버_데이터셋.md](docs/서버_데이터셋.md) | 서버에서 데이터를 모은 절차와 명령 |
